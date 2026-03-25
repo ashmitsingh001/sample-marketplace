@@ -9,14 +9,17 @@ class DatabaseManager:
             "apikey": key,
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "Prefer": "return=representation" # resolution=merge-duplicates is for POST only
+            "Prefer": "return=representation"
         }
+        logging.info("DB: Manager Initialized (v1.0.2-header-fix)")
 
     def _safe_request(self, method, url, **kwargs):
         try:
-            # Use provided headers or fallback to defaults
-            headers = kwargs.pop('headers', self.headers)
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            # Explicitly merge headers to avoid multiple values error
+            custom_headers = kwargs.pop('headers', {})
+            merged_headers = {**self.headers, **custom_headers}
+            
+            resp = requests.request(method, url, headers=merged_headers, **kwargs)
             logging.debug(f"DB Raw Response: {resp.status_code} - {resp.text}")
             
             if resp.status_code >= 400:
