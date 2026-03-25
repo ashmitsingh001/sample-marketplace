@@ -1,0 +1,58 @@
+name: Ingestion Pipeline
+
+on:
+  push:
+    paths:
+      - 'incoming/**'
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ingest-${{ github.workflow }}-${{ github.ref }} # Simplified for now, can refine per pack slug
+      cancel-in-progress: false
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          # Audiowaveform installation (assuming standard PPA or binary)
+          sudo add-apt-repository -y ppa:chris-needham/ppa
+          sudo apt-get update
+          sudo apt-get install -y audiowaveform
+
+      - name: Install Python Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Process New Packs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Identify new zips in incoming/
+          for zip in incoming/*.zip; do
+            if [ -f "$zip" ]; then
+              echo "Processing $zip..."
+              python scripts/main.py --zip "$zip"
+            fi
+          done
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-logs
+          path: logs/
