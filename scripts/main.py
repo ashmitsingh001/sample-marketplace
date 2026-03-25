@@ -24,6 +24,7 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
         pack = db_manager.upsert_pack({
             'external_id': pack_name,
             'title': pack_name.replace('_', ' ').title(),
+            'slug': pack_name.lower(),
             'processing_status': 'processing'
         })
     
