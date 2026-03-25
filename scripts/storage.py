@@ -45,7 +45,9 @@ class TelegramStorageProvider:
                 )
                 data = resp.json()
                 if data.get('ok'):
-                    return data['result']['document']['file_id']
+                    file_id = data['result']['document']['file_id']
+                    logging.info(f"Upload successful → file_id: {file_id}")
+                    return file_id
                 logging.error(f"Telegram upload failed: {data}")
                 return None
         except Exception as e:
