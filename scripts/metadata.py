@@ -38,9 +38,18 @@ def extract_metadata(filename):
     key_match = re.search(r'(?i)\b([A-G][#b]?(?:m|min|minor)?)\b', filename)
     key = normalize_key(key_match.group(1)) if key_match else 'Unknown'
     
+    # 4. Guess Category: Look for common tags
+    category = 'Other'
+    categories = ['Kick', 'Snare', 'Hat', 'Perc', 'Loop', 'Synth', 'Bass', 'Pad', 'Lead', 'Fx']
+    for cat in categories:
+        if cat.lower() in clean_name:
+            category = cat
+            break
+
     return {
         'bpm': bpm,
         'key': key,
+        'category': category,
         'needs_review': (bpm == 0 or key == 'Unknown')
     }
 
