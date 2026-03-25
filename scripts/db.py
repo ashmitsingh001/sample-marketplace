@@ -14,7 +14,9 @@ class DatabaseManager:
 
     def _safe_request(self, method, url, **kwargs):
         try:
-            resp = requests.request(method, url, headers=self.headers, **kwargs)
+            # Use provided headers or fallback to defaults
+            headers = kwargs.pop('headers', self.headers)
+            resp = requests.request(method, url, headers=headers, **kwargs)
             logging.debug(f"DB Raw Response: {resp.status_code} - {resp.text}")
             
             if resp.status_code >= 400:
