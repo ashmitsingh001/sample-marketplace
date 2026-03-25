@@ -72,9 +72,12 @@ class DatabaseManager:
         result = self._safe_request("POST", f"{self.url}/samples", json=sample_data, headers=headers)
         return result is not None
 
-    def update_pack_status(self, pack_id, status):
+    def update_pack(self, pack_id, update_data):
         if DRY_RUN_DB:
-            logging.info(f"[DRY-RUN-DB] Mock update_pack_status: {status}")
+            logging.info(f"[DRY-RUN-DB] Mock update_pack: {update_data}")
             return True
-        logging.info(f"DB: Updating pack {pack_id} status to {status}")
-        return self._safe_request("PATCH", f"{self.url}/packs?id=eq.{pack_id}", json={'processing_status': status})
+        logging.info(f"DB: Updating pack {pack_id} with {list(update_data.keys())}")
+        return self._safe_request("PATCH", f"{self.url}/packs?id=eq.{pack_id}", json=update_data)
+
+    def update_pack_status(self, pack_id, status):
+        return self.update_pack(pack_id, {'processing_status': status})

@@ -44,7 +44,7 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
             db_manager.update_pack_status(pack_id, 'failed')
             logging.error("Telegram upload failed. Stopping.")
             return
-        db_manager.upsert_pack({'id': pack_id, 'pack_file_id': file_id})
+        db_manager.update_pack(pack_id, {'pack_file_id': file_id})
     
     # 3. Processing Loop
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -110,8 +110,9 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
                             'title': orig_filename.rsplit('.', 1)[0],
                             'bpm': meta['bpm'],
                             'musical_key': meta['key'],
+                            'category': meta['category'], # Adding category explicitly
                             'preview_url': p_url,
-                            'metadata': {'waveform_url': w_url},
+                            'extra_metadata': {'waveform_url': w_url},
                             'processing_status': 'completed'
                         }
                         db_manager.upsert_sample(sample_data)
