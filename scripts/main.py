@@ -36,12 +36,8 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
 
     # 2. Telegram Upload (ZIP)
     if not pack.get('pack_file_id'):
-        if DRY_RUN:
-            logging.info("[DRY-RUN] Skipping Telegram ZIP upload.")
-            file_id = "dry-run-id"
-        else:
-            logging.info("Uploading ZIP to Telegram...")
-            file_id = tg_provider.upload_zip(zip_path)
+        logging.info("Uploading ZIP to Telegram...")
+        file_id = tg_provider.upload_zip(zip_path)
         
         if not file_id:
             db_manager.update_pack_status(pack_id, 'failed')
@@ -103,16 +99,10 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
                 if generate_preview(audio_path, preview_file) and generate_waveform(audio_path, waveform_file):
                     # Upload
                     s_path = f"{pack_slug}/{sanitized}"
-                    if DRY_RUN:
-                        logging.info(f"[DRY-RUN] Skipping storage upload for {sanitized}")
-                        p_url = f"https://dry-run.com/{sanitized}.mp3"
-                        w_url = f"https://dry-run.com/{sanitized}.json"
-                    else:
-                        p_url = storage_provider.upload_file(preview_file, f"{s_path}.mp3")
-                        w_url = storage_provider.upload_file(waveform_file, f"{s_path}.json")
+                    p_url = storage_provider.upload_file(preview_file, f"{s_path}.mp3")
+                    w_url = storage_provider.upload_file(waveform_file, f"{s_path}.json")
                     
                     if p_url and w_url:
-                        # DB Sync
                         sample_data = {
                             'pack_id': pack_id,
                             'filename': orig_filename,
@@ -123,10 +113,7 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
                             'metadata': {'waveform_url': w_url},
                             'processing_status': 'completed'
                         }
-                        if DRY_RUN:
-                            logging.info(f"[DRY-RUN] Skipping DB upsert for {orig_filename}")
-                        else:
-                            db_manager.upsert_sample(sample_data)
+                        db_manager.upsert_sample(sample_data)
                         processed_count += 1
                     else:
                         raise Exception("Upload failed")

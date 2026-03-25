@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+from config import DRY_RUN
 
 class StorageProvider:
     """Base class for storage abstraction"""
@@ -14,11 +15,12 @@ class SupabaseStorageProvider(StorageProvider):
         self.headers = {"Authorization": f"Bearer {key}", "x-upsert": "true"}
 
     def upload_file(self, local_path, remote_path):
+        if DRY_RUN:
+            logging.info(f"[DRY-RUN] Mock Supabase upload: {remote_path}")
+            return f"https://dry-run.supabase.co/{remote_path}"
         with open(local_path, 'rb') as f:
             resp = requests.post(f"{self.url}/{remote_path}", headers=self.headers, data=f)
             if resp.status_code == 200:
-                # Return the public URL (Note: Actual Supabase public URL logic might differ)
-                # For this implementation, we assume a standard path format
                 return f"{remote_path}"
             logging.error(f"Supabase upload failed: {resp.text}")
             return None
@@ -31,6 +33,9 @@ class TelegramStorageProvider:
 
     def upload_zip(self, file_path):
         """Uploads ZIP to Telegram and returns file_id"""
+        if DRY_RUN:
+            logging.info(f"[DRY-RUN] Mock Telegram upload: {os.path.basename(file_path)}")
+            return "mock-telegram-file-id"
         try:
             with open(file_path, 'rb') as f:
                 resp = requests.post(
