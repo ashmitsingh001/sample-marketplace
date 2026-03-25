@@ -1,7 +1,7 @@
 import os
 import requests
 import logging
-from config import DRY_RUN
+from config import DRY_RUN_STORAGE
 
 class StorageProvider:
     """Base class for storage abstraction"""
@@ -15,8 +15,8 @@ class SupabaseStorageProvider(StorageProvider):
         self.headers = {"Authorization": f"Bearer {key}", "x-upsert": "true"}
 
     def upload_file(self, local_path, remote_path):
-        if DRY_RUN:
-            logging.info(f"[DRY-RUN] Mock Supabase upload: {remote_path}")
+        if DRY_RUN_STORAGE:
+            logging.info(f"STORAGE: Skipped (DRY_RUN_STORAGE) for {remote_path}")
             return f"https://dry-run.supabase.co/{remote_path}"
         with open(local_path, 'rb') as f:
             resp = requests.post(f"{self.url}/{remote_path}", headers=self.headers, data=f)
@@ -33,8 +33,8 @@ class TelegramStorageProvider:
 
     def upload_zip(self, file_path):
         """Uploads ZIP to Telegram and returns file_id"""
-        if DRY_RUN:
-            logging.info(f"[DRY-RUN] Mock Telegram upload: {os.path.basename(file_path)}")
+        if DRY_RUN_STORAGE:
+            logging.info(f"STORAGE: Skipped Telegram ZIP upload (DRY_RUN_STORAGE)")
             return "mock-telegram-file-id"
         try:
             with open(file_path, 'rb') as f:
