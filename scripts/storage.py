@@ -35,6 +35,12 @@ class TelegramStorageProvider:
     def _send_document(self, chat_id, file_path, caption=None):
         """Core helper: sends a document to any channel and returns file_id."""
         try:
+            # Check file size (Telegram Bot API limit is 50MB for most bots)
+            size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            if size_mb > 50:
+                logging.warning(f"File {os.path.basename(file_path)} is {size_mb:.2f}MB, which exceeds Telegram's 50MB bot limit. Skipping.")
+                return None
+
             with open(file_path, 'rb') as f:
                 data = {'chat_id': chat_id}
                 if caption:
@@ -49,6 +55,12 @@ class TelegramStorageProvider:
                     file_id = result['result']['document']['file_id']
                     logging.info(f"Upload successful → file_id: {file_id}")
                     return file_id
+                
+                # Special handling for size error just in case check fails
+                if "file is too big" in str(result).lower():
+                    logging.warning(f"Telegram rejected {os.path.basename(file_path)}: File too large.")
+                    return None
+                    
                 logging.error(f"Telegram upload failed: {result}")
                 return None
         except Exception as e:

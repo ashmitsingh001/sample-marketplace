@@ -35,18 +35,16 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
     pack_id = pack['id']
     pack_slug = pack.get('slug', pack_name.lower())
 
-    # 2. Telegram Upload (ZIP → PACKS channel)
     if not pack.get('pack_file_id'):
         file_id = tg_provider.upload_zip(
             zip_path,
             pack_id=pack_id,
             pack_title=pack.get('title', pack_name)
         )
-        if not file_id:
-            db_manager.update_pack_status(pack_id, 'failed')
-            logging.error("Telegram ZIP upload failed. Stopping.")
-            return
-        db_manager.update_pack(pack_id, {'pack_file_id': file_id})
+        if file_id:
+            db_manager.update_pack(pack_id, {'pack_file_id': file_id})
+        else:
+            logging.warning("Pack ZIP upload was skipped or failed (likely exceeds 50MB). The pack will be available via individual samples only.")
     
     # 3. Processing Loop
     with tempfile.TemporaryDirectory() as tmpdir:
