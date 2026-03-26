@@ -25,6 +25,17 @@ class SupabaseStorageProvider(StorageProvider):
             logging.error(f"Supabase upload failed: {resp.text}")
             return None
 
+    def download_file(self, remote_path, local_path):
+        """Downloads a file from Supabase storage for local processing."""
+        logging.info(f"Downloading from Supabase: {remote_path}...")
+        resp = requests.get(f"{self.url}/{remote_path}", headers=self.headers)
+        if resp.status_code == 200:
+            with open(local_path, 'wb') as f:
+                f.write(resp.content)
+            return True
+        logging.error(f"Supabase download failed: {resp.text}")
+        return False
+
 class TelegramStorageProvider:
     def __init__(self, bot_token, chat_id):
         self.token = bot_token

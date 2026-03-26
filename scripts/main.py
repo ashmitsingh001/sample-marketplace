@@ -4,21 +4,26 @@ import tempfile
 import time
 import logging
 import argparse
+import shutil
 from config import *
 from metadata import extract_metadata, sanitize_filename
 from audio import generate_preview, generate_waveform
 from storage import SupabaseStorageProvider, TelegramStorageProvider
 from db import DatabaseManager
+from zip_indexer import ZipIndexer
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-def process_pack(zip_path, db_manager, storage_provider, tg_provider):
+def process_pack(zip_remote_path, db_manager, storage_previews, storage_packs, tg_provider):
+    """
+    Refined flow for Module 2.5: ZIP Indexing & On-Demand Extraction.
+    """
     start_time = time.time()
-    pack_name = os.path.basename(zip_path).rsplit('.', 1)[0]
+    pack_name = os.path.basename(zip_remote_path).rsplit('.', 1)[0]
     
     # 1. Register Pack
-    logging.info(f"Registering pack: {pack_name}")
+    logging.info(f"Registering/Fetching pack: {pack_name}")
     pack = db_manager.get_pack_by_id(pack_name)
     if not pack:
         pack = db_manager.upsert_pack({
@@ -35,125 +40,145 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
     pack_id = pack['id']
     pack_slug = pack.get('slug', pack_name.lower())
 
-    if not pack.get('pack_file_id'):
-        file_id = tg_provider.upload_zip(
-            zip_path,
-            pack_id=pack_id,
-            pack_title=pack.get('title', pack_name)
-        )
-        if file_id:
-            db_manager.update_pack(pack_id, {'pack_file_id': file_id})
-        else:
-            logging.warning("Pack ZIP upload was skipped or failed (likely exceeds 50MB). The pack will be available via individual samples only.")
-    
-    # 3. Processing Loop
+    # 2. Setup Local Working Space
     with tempfile.TemporaryDirectory() as tmpdir:
-        logging.info(f"Unzipping {zip_path}...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(tmpdir)
+        local_zip = os.path.join(tmpdir, "source.zip")
+        final_zip = os.path.join(tmpdir, "final.zip")
         
-        # Build File List
-        audio_files = []
-        for root, _, files in os.walk(tmpdir):
-            for f in files:
-                if any(f.endswith(ext) for ext in SUPPORTED_EXTENSIONS):
-                    audio_files.append(os.path.join(root, f))
+        # Step A: Download ZIP from Supabase
+        if not storage_packs.download_file(zip_remote_path, local_zip):
+            logging.error("Failed to download ZIP from Supabase Storage.")
+            return
+
+        # Step B: Initial Scan
+        logging.info("Step B: Performing initial ZIP scan...")
+        initial_index = ZipIndexer.get_index(local_zip)
+        needs_repack = any(e['needs_repack'] for e in initial_index)
         
-        logging.info(f"Found {len(audio_files)} samples.")
+        # Step C: Conditional Repack (Normalize to STORE mode)
+        if needs_repack:
+            logging.info("Repack requested: Normalizing ZIP to STORE mode (no compression)...")
+            with zipfile.ZipFile(local_zip, 'r') as zin:
+                with zipfile.ZipFile(final_zip, 'w', compression=zipfile.ZIP_STORED) as zout:
+                    for item in zin.infolist():
+                        if item.is_dir(): continue
+                        zout.writestr(item.filename, zin.read(item.filename))
+        else:
+            logging.info("ZIP is already optimized (STORE mode). Skipping repack.")
+            shutil.copy2(local_zip, final_zip)
+
+        # Step D: Final Indexing (Single Source of Truth)
+        logging.info("Step D: Performing final Data-Level Indexing...")
+        final_index = ZipIndexer.get_index(final_zip)
+        
+        # Step E: Upload Optimized ZIP back to Supabase (only if changed)
+        if needs_repack:
+            logging.info("Uploading optimized ZIP to Supabase Storage...")
+            storage_packs.upload_file(final_zip, zip_remote_path)
+        
+        # Update Pack with indexed ZIP path (Source of Truth)
+        db_manager.update_pack(pack_id, {
+            'zip_path': zip_remote_path,
+            'is_indexed': True
+        })
+
+        # 3. Processing Loop (Using Final Index)
+        audio_files = [e for e in final_index if e['is_audio']]
+        logging.info(f"Found {len(audio_files)} audio samples to index.")
         
         processed_count = 0
         failed_count = 0
         skipped_count = 0
 
-        for audio_path in audio_files:
-            # Timeout Check
-            elapsed = (time.time() - start_time) / 60
-            if elapsed > MAX_RUNTIME_MINUTES:
-                logging.warning("Approaching timeout limit. Stopping loop.")
-                db_manager.update_pack_status(pack_id, 'partial')
-                break
-            
-            if processed_count >= MAX_FILES_PER_RUN:
-                logging.info(f"Reached batch limit ({MAX_FILES_PER_RUN}).")
-                db_manager.update_pack_status(pack_id, 'partial')
-                break
-
-            orig_filename = os.path.basename(audio_path)
-            
-            # Idempotency Check
-            status = db_manager.get_sample_status(pack_id, orig_filename)
-            if status and status.get('processing_status') == 'completed' and status.get('preview_url'):
-                skipped_count += 1
-                continue
-            
-            # Process Sample
-            logging.info(f"Processing: {orig_filename}")
-            try:
-                # Meta
-                meta = extract_metadata(orig_filename)
-                sanitized = sanitize_filename(orig_filename)
+        # Open the final ZIP once for efficient extraction during loop
+        with zipfile.ZipFile(final_zip, 'r') as z:
+            for entry in audio_files:
+                orig_filename = entry['filename']
                 
-                # Previews
-                preview_file = os.path.join(tmpdir, f"{sanitized}.mp3")
-                waveform_file = os.path.join(tmpdir, f"{sanitized}.json")
+                # Timeout/Batch Checks
+                elapsed = (time.time() - start_time) / 60
+                if elapsed > MAX_RUNTIME_MINUTES or processed_count >= MAX_FILES_PER_RUN:
+                    db_manager.update_pack_status(pack_id, 'partial')
+                    break
+
+                # Idempotency Check
+                status = db_manager.get_sample_status(pack_id, orig_filename)
+                if status and status.get('processing_status') == 'completed' and status.get('is_indexed'):
+                    skipped_count += 1
+                    continue
                 
-                if generate_preview(audio_path, preview_file) and generate_waveform(audio_path, waveform_file):
-                    # Upload previews to Supabase Storage
-                    s_path = f"{pack_slug}/{sanitized}"
-                    p_url = storage_provider.upload_file(preview_file, f"{s_path}.mp3")
-                    w_url = storage_provider.upload_file(waveform_file, f"{s_path}.json")
-
-                    if p_url and w_url:
-                        # Upload original WAV to Telegram SAMPLES channel
-                        sample_file_id = tg_provider.upload_sample(audio_path, {
-                            'pack_id': pack_id,
-                            'filename': orig_filename,
-                            'bpm': meta['bpm'],
-                            'key': meta['key'],
-                            'category': meta['category'],
-                        })
-
-                        sample_data = {
-                            'pack_id': pack_id,
-                            'filename': orig_filename,
-                            'title': orig_filename.rsplit('.', 1)[0],
-                            'bpm': meta['bpm'],
-                            'musical_key': meta['key'],
-                            'category': meta['category'],
-                            'preview_url': p_url,
-                            'sample_file_id': sample_file_id,
-                            'extra_metadata': {'waveform_url': w_url},
-                            'processing_status': 'completed'
-                        }
-                        db_manager.upsert_sample(sample_data)
-                        processed_count += 1
-                    else:
-                        raise Exception("Upload failed")
-                else:
-                    raise Exception("FFmpeg/Audiowaveform failed")
+                logging.info(f"Processing: {orig_filename}")
+                try:
+                    # Extract to temp for preview generation
+                    sanitized = sanitize_filename(os.path.basename(orig_filename))
+                    local_sample_path = os.path.join(tmpdir, f"extract_{sanitized}.wav")
                     
-            except Exception as e:
-                logging.error(f"Failed processing {orig_filename}: {e}")
-                db_manager.upsert_sample({
-                    'pack_id': pack_id,
-                    'filename': orig_filename,
-                    'processing_status': 'failed'
-                })
-                failed_count += 1
+                    with open(local_sample_path, 'wb') as f:
+                        f.write(z.read(orig_filename))
+
+                    # 4. Generate Previews (MP3 + Waveform)
+                    meta = extract_metadata(orig_filename)
+                    preview_file = os.path.join(tmpdir, f"{sanitized}.mp3")
+                    waveform_file = os.path.join(tmpdir, f"{sanitized}.json")
+                    
+                    if generate_preview(local_sample_path, preview_file) and generate_waveform(local_sample_path, waveform_file):
+                        # Upload to Previews Bucket
+                        s_path = f"{pack_slug}/{sanitized}"
+                        p_url = storage_previews.upload_file(preview_file, f"{s_path}.mp3")
+                        w_url = storage_previews.upload_file(waveform_file, f"{s_path}.json")
+
+                        if p_url and w_url:
+                            # 5. Save to DB with Byte Offsets
+                            sample_data = {
+                                'pack_id': pack_id,
+                                'filename': orig_filename,
+                                'title': os.path.basename(orig_filename).rsplit('.', 1)[0],
+                                'bpm': meta['bpm'],
+                                'musical_key': meta['key'],
+                                'category': meta['category'],
+                                'preview_url': p_url,
+                                'extra_metadata': {'waveform_url': w_url},
+                                'processing_status': 'completed',
+                                # --- Advanced Indexing Fields ---
+                                'data_start': entry['data_start'],
+                                'data_end': entry['data_end'],
+                                'file_size': entry['file_size'],
+                                'compression_method': entry['compression_method'],
+                                'zip_path': zip_remote_path,
+                                'is_indexed': True
+                            }
+                            db_manager.upsert_sample(sample_data)
+                            processed_count += 1
+                        else:
+                            raise Exception("Preview upload failed")
+                    else:
+                        raise Exception("FFmpeg failed")
+                        
+                except Exception as e:
+                    logging.error(f"Failed {orig_filename}: {e}")
+                    db_manager.upsert_sample({'pack_id': pack_id, 'filename': orig_filename, 'processing_status': 'failed'})
+                    failed_count += 1
         
-        # Final Report
         logging.info(f"Done! Processed: {processed_count}, Skipped: {skipped_count}, Failed: {failed_count}")
         if failed_count == 0 and processed_count + skipped_count >= len(audio_files):
             db_manager.update_pack_status(pack_id, 'completed')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--zip", required=True, help="Path to sample pack ZIP")
+    parser.add_argument("--remote-zip", required=True, help="Remote path in Supabase 'packs' bucket")
     args = parser.parse_args()
     
-    # Init Managers (Mocked with env vars)
-    db = DatabaseManager(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
-    storage = SupabaseStorageProvider(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
-    tg = TelegramStorageProvider(os.environ['TELEGRAM_BOT_TOKEN'], os.environ['TELEGRAM_CHAT_ID'])
+    # Init Managers
+    s_url = os.environ.get('SUPABASE_URL')
+    s_key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
     
-    process_pack(args.zip, db, storage, tg)
+    if not s_url or not s_key:
+        print("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables.")
+        exit(1)
+        
+    db = DatabaseManager(s_url, s_key)
+    storage_previews = SupabaseStorageProvider(s_url, s_key, bucket='previews')
+    storage_packs = SupabaseStorageProvider(s_url, s_key, bucket='packs')
+    tg = TelegramStorageProvider(os.environ.get('TELEGRAM_BOT_TOKEN', ''), os.environ.get('TELEGRAM_CHAT_ID', ''))
+    
+    process_pack(args.remote_zip, db, storage_previews, storage_packs, tg)

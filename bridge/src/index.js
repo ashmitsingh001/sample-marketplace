@@ -142,27 +142,84 @@ async function handlePackDownload(packId, env) {
 
 /**
  * Handles individual WAV sample download.
+ * Supports both "Pure Streaming" (Supabase Range) and "Legacy" (Telegram) modes.
  */
 async function handleSampleDownload(sampleId, env) {
   try {
-    const sample = await fetchFromSupabase('samples', sampleId, 'id,filename,sample_file_id', env);
+    const fields = 'id,filename,data_start,data_end,zip_path,is_indexed,sample_file_id';
+    const sample = await fetchFromSupabase('samples', sampleId, fields, env);
     if (!sample) return jsonError(404, 'Sample not found.');
-    if (!sample.sample_file_id) return jsonError(503, 'Sample file not available for download.');
-    const telegramUrl = await getTelegramDownloadUrl(sample.sample_file_id, env);
-    if (!telegramUrl) return jsonError(502, 'Failed to resolve download URL from Telegram.');
+
     const filename = sample.filename || `${sampleId}.wav`;
-    const upstream = await fetch(telegramUrl);
-    if (!upstream.ok) return jsonError(502, 'Failed to stream sample from Telegram.');
-    return new Response(upstream.body, {
-      status: 200,
-      headers: {
-        'Content-Type': 'audio/wav',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': upstream.headers.get('Content-Length') || '',
-        'Cache-Control': 'no-store',
-        ...CORS_HEADERS,
-      },
-    });
+
+    // --- MODE 1: PURE STREAMING (Supabase Range) ---
+    if (sample.is_indexed && sample.zip_path && sample.data_start !== null && sample.data_end !== null) {
+      // 1. Validate Bounds
+      if (sample.data_start < 0 || sample.data_end <= sample.data_start) {
+        console.error(`Invalid range offsets for sample ${sampleId}: ${sample.data_start}-${sample.data_end}`);
+        return jsonError(416, 'Requested range not satisfiable: Invalid offsets in database.');
+      }
+
+      // 2. Construct Supabase Storage URL
+      const supabaseUrl = `${env.SUPABASE_URL}/storage/v1/object/packs/${sample.zip_path}`;
+      const rangeHeader = `bytes=${sample.data_start}-${sample.data_end}`;
+
+      console.log(`Streaming sample ${sampleId} from Supabase: ${sample.zip_path} (Range: ${rangeHeader})`);
+
+      // 3. Perform Range Fetch
+      const upstream = await fetch(supabaseUrl, {
+        headers: {
+          'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+          'Range': rangeHeader
+        }
+      });
+
+      // 4. Handle Response (Accept 206 Partial or 200 Full)
+      if (upstream.status === 206 || upstream.status === 200) {
+        const headers = {
+          'Content-Type': 'audio/wav',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Content-Length': upstream.headers.get('Content-Length') || '',
+          'Cache-Control': 'no-store',
+          ...CORS_HEADERS,
+        };
+
+        // Forward Content-Range if it exists
+        const contentRange = upstream.headers.get('Content-Range');
+        if (contentRange) headers['Content-Range'] = contentRange;
+
+        return new Response(upstream.body, {
+          status: upstream.status,
+          headers
+        });
+      }
+
+      console.error(`Supabase Range Fetch failed (${upstream.status}):`, await upstream.text());
+      return jsonError(502, 'Failed to extract sample from ZIP hub.');
+    }
+
+    // --- MODE 2: LEGACY FALLBACK (Telegram) ---
+    if (sample.sample_file_id) {
+      console.log(`Falling back to Telegram for sample ${sampleId}`);
+      const telegramUrl = await getTelegramDownloadUrl(sample.sample_file_id, env);
+      if (!telegramUrl) return jsonError(502, 'Failed to resolve download URL from Telegram.');
+
+      const upstream = await fetch(telegramUrl);
+      if (!upstream.ok) return jsonError(502, 'Failed to stream sample from Telegram.');
+
+      return new Response(upstream.body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/wav',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Content-Length': upstream.headers.get('Content-Length') || '',
+          'Cache-Control': 'no-store',
+          ...CORS_HEADERS,
+        },
+      });
+    }
+
+    return jsonError(503, 'Sample file not available for download (unindexed and no Telegram fallback).');
   } catch (err) {
     console.error('Bridge error (sample):', err);
     return jsonError(500, 'Internal server error.');
