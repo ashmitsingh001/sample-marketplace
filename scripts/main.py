@@ -8,14 +8,14 @@ import shutil
 from config import *
 from metadata import extract_metadata, sanitize_filename
 from audio import generate_preview, generate_waveform
-from storage import SupabaseStorageProvider, TelegramStorageProvider
+from storage import SupabaseStorageProvider, TelegramStorageProvider, R2StorageProvider
 from db import DatabaseManager
 from zip_indexer import ZipIndexer
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-def process_pack(zip_remote_path, db_manager, storage_previews, storage_packs, tg_provider):
+def process_pack(zip_remote_path, db_manager, storage_previews, storage_supabase_packs, storage_r2, tg_provider):
     """
     Refined flow for Module 2.5: ZIP Indexing & On-Demand Extraction.
     """
@@ -71,15 +71,26 @@ def process_pack(zip_remote_path, db_manager, storage_previews, storage_packs, t
         logging.info("Step D: Performing final Data-Level Indexing...")
         final_index = ZipIndexer.get_index(final_zip)
         
-        # Step E: Upload Optimized ZIP back to Supabase (only if changed)
-        if needs_repack:
-            logging.info("Uploading optimized ZIP to Supabase Storage...")
-            storage_packs.upload_file(final_zip, zip_remote_path)
+        # Step E: Upload Optimized ZIP back to to the correct provider
+        zip_size = os.path.getsize(final_zip)
+        storage_provider = 'r2' if zip_size > 40 * 1024 * 1024 else 'supabase'
         
-        # Update Pack with indexed ZIP path (Source of Truth)
+        logging.info(f"Final ZIP size: {zip_size / (1024*1024):.2f}MB. Selecting provider: {storage_provider}")
+        
+        if storage_provider == 'r2':
+            storage_packs = storage_r2
+        else:
+            storage_packs = storage_supabase_packs
+            
+        logging.info(f"Uploading optimized ZIP ({storage_provider})...")
+        storage_packs.upload_file(final_zip, zip_remote_path)
+        
+        # Update Pack with indexed ZIP path, size and provider
         db_manager.update_pack(pack_id, {
             'zip_path': zip_remote_path,
-            'is_indexed': True
+            'is_indexed': True,
+            'storage_provider': storage_provider,
+            'zip_size': zip_size
         })
 
         # 3. Processing Loop (Using Final Index)
@@ -145,6 +156,7 @@ def process_pack(zip_remote_path, db_manager, storage_previews, storage_packs, t
                                 'file_size': entry['file_size'],
                                 'compression_method': entry['compression_method'],
                                 'zip_path': zip_remote_path,
+                                'storage_provider': storage_provider,
                                 'is_indexed': True
                             }
                             db_manager.upsert_sample(sample_data)
@@ -178,7 +190,21 @@ if __name__ == "__main__":
         
     db = DatabaseManager(s_url, s_key)
     storage_previews = SupabaseStorageProvider(s_url, s_key, bucket='previews')
-    storage_packs = SupabaseStorageProvider(s_url, s_key, bucket='packs')
+    storage_supabase_packs = SupabaseStorageProvider(s_url, s_key, bucket='packs')
+    
+    # Initialize R2 if credentials provided
+    r2_acc = os.environ.get('R2_ACCOUNT_ID')
+    r2_key = os.environ.get('R2_ACCESS_KEY')
+    r2_sec = os.environ.get('R2_SECRET_KEY')
+    r2_bucket = os.environ.get('R2_BUCKET_NAME', 'packs')
+    
+    storage_r2 = None
+    if r2_acc and r2_key and r2_sec:
+        storage_r2 = R2StorageProvider(r2_acc, r2_key, r2_sec, r2_bucket)
+    else:
+        logging.warning("R2 credentials not found. Defaulting all to Supabase.")
+        storage_r2 = storage_supabase_packs
+
     tg = TelegramStorageProvider(os.environ.get('TELEGRAM_BOT_TOKEN', ''), os.environ.get('TELEGRAM_CHAT_ID', ''))
     
-    process_pack(args.remote_zip, db, storage_previews, storage_packs, tg)
+    process_pack(args.remote_zip, db, storage_previews, storage_supabase_packs, storage_r2, tg)

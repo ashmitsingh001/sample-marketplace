@@ -1,13 +1,15 @@
 import os
 import requests
 import logging
+import hashlib
+import hmac
+import datetime
 from config import DRY_RUN_STORAGE, TELEGRAM_SAMPLES_CHAT_ID
 
 class StorageProvider:
     """Base class for storage abstraction"""
-    def upload_preview(self, file_path, remote_path): raise NotImplementedError
-    def upload_waveform(self, file_path, remote_path): raise NotImplementedError
-    def upload_pack(self, file_path, remote_path): raise NotImplementedError
+    def upload_file(self, local_path, remote_path): raise NotImplementedError
+    def download_file(self, remote_path, local_path): raise NotImplementedError
 
 class SupabaseStorageProvider(StorageProvider):
     def __init__(self, url, key, bucket='previews'):
@@ -17,7 +19,7 @@ class SupabaseStorageProvider(StorageProvider):
     def upload_file(self, local_path, remote_path):
         if DRY_RUN_STORAGE:
             logging.info(f"STORAGE: Skipped (DRY_RUN_STORAGE) for {remote_path}")
-            return f"https://dry-run.supabase.co/{remote_path}"
+            return f"{remote_path}"
         with open(local_path, 'rb') as f:
             resp = requests.post(f"{self.url}/{remote_path}", headers=self.headers, data=f)
             if resp.status_code == 200:
@@ -34,6 +36,86 @@ class SupabaseStorageProvider(StorageProvider):
                 f.write(resp.content)
             return True
         logging.error(f"Supabase download failed: {resp.text}")
+        return False
+
+class R2StorageProvider(StorageProvider):
+    """
+    Minimal Cloudflare R2 / S3 Storage Provider using manual SIGV4 signing.
+    Avoids boto3 dependency.
+    """
+    def __init__(self, account_id, access_key, secret_key, bucket_name):
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.bucket = bucket_name
+        self.endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+        self.region = "auto"
+        self.service = "s3"
+
+    def _sign(self, key, msg):
+        return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+    def _get_signature_key(self, key, date_stamp, region_name, service_name):
+        k_date = self._sign(('AWS4' + key).encode('utf-8'), date_stamp)
+        k_region = self._sign(k_date, region_name)
+        k_service = self._sign(k_region, service_name)
+        k_signing = self._sign(k_service, 'aws4_request')
+        return k_signing
+
+    def upload_file(self, local_path, remote_path):
+        if DRY_RUN_STORAGE:
+            logging.info(f"STORAGE (R2): Skipped (DRY_RUN_STORAGE) for {remote_path}")
+            return f"{remote_path}"
+
+        method = 'PUT'
+        host = f"{self.bucket}.{os.path.basename(self.endpoint)}"
+        endpoint_url = f"https://{host}/{remote_path}"
+        
+        t = datetime.datetime.utcnow()
+        amz_date = t.strftime('%Y%m%dT%H%M%SZ')
+        date_stamp = t.strftime('%Y%m%d')
+
+        with open(local_path, 'rb') as f:
+            payload = f.read()
+
+        payload_hash = hashlib.sha256(payload).hexdigest()
+        canonical_uri = '/' + remote_path
+        canonical_querystring = ''
+        canonical_headers = f"host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+        signed_headers = 'host;x-amz-content-sha256;x-amz-date'
+        
+        canonical_request = (f"{method}\n{canonical_uri}\n{canonical_querystring}\n"
+                             f"{canonical_headers}\n{signed_headers}\n{payload_hash}")
+        
+        algorithm = 'AWS4-HMAC-SHA256'
+        credential_scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
+        string_to_sign = (f"{algorithm}\n{amz_date}\n{credential_scope}\n"
+                          f"{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}")
+
+        signing_key = self._get_signature_key(self.secret_key, date_stamp, self.region, self.service)
+        signature = hmac.new(signing_key, (string_to_sign).encode('utf-8'), hashlib.sha256).hexdigest()
+
+        headers = {
+            'x-amz-date': amz_date,
+            'x-amz-content-sha256': payload_hash,
+            'Authorization': f"{algorithm} Credential={self.access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+        }
+
+        logging.info(f"Uploading to R2: {remote_path}...")
+        resp = requests.put(endpoint_url, data=payload, headers=headers)
+        
+        if resp.status_code == 200:
+            return f"{remote_path}"
+        logging.error(f"R2 upload failed: {resp.status_code} {resp.text}")
+        return None
+
+    def download_file(self, remote_path, local_path):
+        """
+        Downloads a file from R2 storage.
+        Note: Extraction usually happens in the Worker, but this is for ingestion-side downloads if needed.
+        Requires GET signature logic (similar to PUT).
+        """
+        # For now, we return False as ingestion usually downloads from Supabase or local Source.
+        logging.warning("R2 download_file not fully implemented (minimal version).")
         return False
 
 class TelegramStorageProvider:

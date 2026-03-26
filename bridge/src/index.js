@@ -146,13 +146,16 @@ async function handlePackDownload(packId, env) {
  */
 async function handleSampleDownload(sampleId, env) {
   try {
-    const fields = 'id,filename,data_start,data_end,zip_path,is_indexed,sample_file_id';
+    const fields = 'id,filename,data_start,data_end,zip_path,is_indexed,sample_file_id,pack_id';
     const sample = await fetchFromSupabase('samples', sampleId, fields, env);
     if (!sample) return jsonError(404, 'Sample not found.');
 
+    const pack = await fetchFromSupabase('packs', sample.pack_id, 'id,storage_provider', env);
+    if (!pack) return jsonError(404, 'Associated pack not found.');
+
     const filename = sample.filename || `${sampleId}.wav`;
 
-    // --- MODE 1: PURE STREAMING (Supabase Range) ---
+    // --- MODE 1: PURE STREAMING (Hybrid Source: R2 or Supabase) ---
     if (sample.is_indexed && sample.zip_path && sample.data_start !== null && sample.data_end !== null) {
       // 1. Validate Bounds
       if (sample.data_start < 0 || sample.data_end <= sample.data_start) {
@@ -160,13 +163,39 @@ async function handleSampleDownload(sampleId, env) {
         return jsonError(416, 'Requested range not satisfiable: Invalid offsets in database.');
       }
 
-      // 2. Construct Supabase Storage URL
-      const supabaseUrl = `${env.SUPABASE_URL}/storage/v1/object/packs/${sample.zip_path}`;
+      const filename = sample.filename || `${sampleId}.wav`;
+      const key = sample.zip_path; // Object key in R2 or path in Supabase
+      const range = { offset: sample.data_start, length: sample.data_end - sample.data_start + 1 };
+
+      // CASE A: Cloudflare R2
+      if (pack.storage_provider === 'r2') {
+        console.log(`Streaming sample ${sampleId} from Cloudflare R2: ${key} (Range: ${sample.data_start}-${sample.data_end})`);
+        
+        if (!env.BUCKET) return jsonError(500, 'R2 Bucket binding is missing.');
+        
+        const object = await env.BUCKET.get(key, { range });
+        
+        if (!object || !object.body) {
+          return jsonError(404, 'Sample object not found in R2 storage.');
+        }
+
+        const headers = {
+          'Content-Type': 'audio/wav',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Content-Length': object.size.toString(),
+          'Cache-Control': 'no-store',
+          ...CORS_HEADERS,
+        };
+
+        return new Response(object.body, { status: 206, headers });
+      }
+
+      // CASE B: Supabase Storage (Legacy/Fallback)
+      const supabaseUrl = `${env.SUPABASE_URL}/storage/v1/object/packs/${key}`;
       const rangeHeader = `bytes=${sample.data_start}-${sample.data_end}`;
 
-      console.log(`Streaming sample ${sampleId} from Supabase: ${sample.zip_path} (Range: ${rangeHeader})`);
+      console.log(`Streaming sample ${sampleId} from Supabase: ${key} (Range: ${rangeHeader})`);
 
-      // 3. Perform Range Fetch
       const upstream = await fetch(supabaseUrl, {
         headers: {
           'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
@@ -174,7 +203,6 @@ async function handleSampleDownload(sampleId, env) {
         }
       });
 
-      // 4. Handle Response (Accept 206 Partial or 200 Full)
       if (upstream.status === 206 || upstream.status === 200) {
         const headers = {
           'Content-Type': 'audio/wav',
@@ -184,14 +212,10 @@ async function handleSampleDownload(sampleId, env) {
           ...CORS_HEADERS,
         };
 
-        // Forward Content-Range if it exists
         const contentRange = upstream.headers.get('Content-Range');
         if (contentRange) headers['Content-Range'] = contentRange;
 
-        return new Response(upstream.body, {
-          status: upstream.status,
-          headers
-        });
+        return new Response(upstream.body, { status: upstream.status, headers });
       }
 
       console.error(`Supabase Range Fetch failed (${upstream.status}):`, await upstream.text());
