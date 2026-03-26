@@ -9,6 +9,7 @@ SUPABASE_URL = "https://qosxgrcdecdmntgzqxbm.supabase.co"
 # Secrets (set via: wrangler secret put TELEGRAM_BOT_TOKEN)
 # TELEGRAM_BOT_TOKEN — set via CLI
 # SUPABASE_SERVICE_ROLE_KEY — set via CLI
+# DOWNLOAD_SECRET — set via CLI (used for signed download tokens)
 
 [[routes]]
 pattern = "download.samply.workers.dev/*"
