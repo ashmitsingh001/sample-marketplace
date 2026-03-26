@@ -35,14 +35,16 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
     pack_id = pack['id']
     pack_slug = pack.get('slug', pack_name.lower())
 
-    # 2. Telegram Upload (ZIP)
+    # 2. Telegram Upload (ZIP → PACKS channel)
     if not pack.get('pack_file_id'):
-        logging.info("Uploading ZIP to Telegram...")
-        file_id = tg_provider.upload_zip(zip_path)
-        
+        file_id = tg_provider.upload_zip(
+            zip_path,
+            pack_id=pack_id,
+            pack_title=pack.get('title', pack_name)
+        )
         if not file_id:
             db_manager.update_pack_status(pack_id, 'failed')
-            logging.error("Telegram upload failed. Stopping.")
+            logging.error("Telegram ZIP upload failed. Stopping.")
             return
         db_manager.update_pack(pack_id, {'pack_file_id': file_id})
     
@@ -98,20 +100,30 @@ def process_pack(zip_path, db_manager, storage_provider, tg_provider):
                 waveform_file = os.path.join(tmpdir, f"{sanitized}.json")
                 
                 if generate_preview(audio_path, preview_file) and generate_waveform(audio_path, waveform_file):
-                    # Upload
+                    # Upload previews to Supabase Storage
                     s_path = f"{pack_slug}/{sanitized}"
                     p_url = storage_provider.upload_file(preview_file, f"{s_path}.mp3")
                     w_url = storage_provider.upload_file(waveform_file, f"{s_path}.json")
-                    
+
                     if p_url and w_url:
+                        # Upload original WAV to Telegram SAMPLES channel
+                        sample_file_id = tg_provider.upload_sample(audio_path, {
+                            'pack_id': pack_id,
+                            'filename': orig_filename,
+                            'bpm': meta['bpm'],
+                            'key': meta['key'],
+                            'category': meta['category'],
+                        })
+
                         sample_data = {
                             'pack_id': pack_id,
                             'filename': orig_filename,
                             'title': orig_filename.rsplit('.', 1)[0],
                             'bpm': meta['bpm'],
                             'musical_key': meta['key'],
-                            'category': meta['category'], # Adding category explicitly
+                            'category': meta['category'],
                             'preview_url': p_url,
+                            'sample_file_id': sample_file_id,
                             'extra_metadata': {'waveform_url': w_url},
                             'processing_status': 'completed'
                         }

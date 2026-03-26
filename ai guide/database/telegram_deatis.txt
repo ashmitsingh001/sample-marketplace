@@ -1,0 +1,9 @@
+Bot token : 8603339451:AAEUOMhRBbizt4LbW3PCqIkr1EMZhMMlDws
+
+# PACKS Channel (ZIP files)
+TELEGRAM_CHAT_ID : -1003704189756
+Channel name     : Sample Storage
+
+# SAMPLES Channel (Individual WAV files)
+TELEGRAM_SAMPLES_CHAT_ID : -1003871571866
+Channel name              : Sample(Sounds)Storage

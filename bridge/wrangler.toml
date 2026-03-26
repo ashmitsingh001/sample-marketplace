@@ -11,6 +11,3 @@ SUPABASE_URL = "https://qosxgrcdecdmntgzqxbm.supabase.co"
 # SUPABASE_SERVICE_ROLE_KEY — set via CLI
 # DOWNLOAD_SECRET — set via CLI (used for signed download tokens)
 
-[[routes]]
-pattern = "download.samply.workers.dev/*"
-zone_name = ""

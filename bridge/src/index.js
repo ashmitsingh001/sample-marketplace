@@ -1,9 +1,10 @@
 /**
  * Samply Download Bridge — Cloudflare Worker
- * Version: 1.1.0 (Signed Token Auth)
+ * Version: 1.2.0 (Individual Sample Downloads)
  *
  * Routes:
- *   GET /download/pack/:pack_id?token=...  → Streams the full ZIP from Telegram
+ *   GET /download/pack/:pack_id?token=...    → Streams full ZIP from Telegram
+ *   GET /download/sample/:sample_id?token=... → Streams individual WAV from Telegram
  *
  * Token Format (base64url-encoded JSON):
  *   { pack_id, expiry (unix seconds), sig (HMAC-SHA256 hex) }
@@ -36,18 +37,21 @@ export default {
     if (packMatch) {
       const packId = packMatch[1];
       const token = url.searchParams.get('token');
-
-      // --- TOKEN VALIDATION ---
-      if (!token) {
-        return jsonError(403, 'Access denied: missing download token.');
-      }
+      if (!token) return jsonError(403, 'Access denied: missing download token.');
       const tokenValid = await verifyToken(token, packId, env.DOWNLOAD_SECRET);
-      if (!tokenValid) {
-        return jsonError(403, 'Access denied: invalid or expired token.');
-      }
-      // --- END TOKEN VALIDATION ---
-
+      if (!tokenValid) return jsonError(403, 'Access denied: invalid or expired token.');
       return handlePackDownload(packId, env);
+    }
+
+    // Route: GET /download/sample/:sample_id
+    const sampleMatch = path.match(/^\/download\/sample\/([a-f0-9\-]{36})$/i);
+    if (sampleMatch) {
+      const sampleId = sampleMatch[1];
+      const token = url.searchParams.get('token');
+      if (!token) return jsonError(403, 'Access denied: missing download token.');
+      const tokenValid = await verifyToken(token, sampleId, env.DOWNLOAD_SECRET);
+      if (!tokenValid) return jsonError(403, 'Access denied: invalid or expired token.');
+      return handleSampleDownload(sampleId, env);
     }
 
     return new Response(JSON.stringify({ error: 'Not Found' }), {
@@ -105,38 +109,21 @@ async function computeHmac(secret, message) {
     .join('');
 }
 
-// ─── DOWNLOAD HANDLER ─────────────────────────────────────────────────────────
+// ─── DOWNLOAD HANDLERS ───────────────────────────────────────────────────────
 
 /**
  * Handles full-pack ZIP download.
- * 1. Fetches pack_file_id from Supabase using the pack UUID.
- * 2. Resolves Telegram download URL from file_id.
- * 3. Streams the ZIP bytes directly to the client.
  */
 async function handlePackDownload(packId, env) {
   try {
-    // Step 1: Fetch pack record from Supabase
-    const pack = await fetchPackFromSupabase(packId, env);
-    if (!pack) {
-      return jsonError(404, 'Pack not found or inactive.');
-    }
-    if (!pack.pack_file_id) {
-      return jsonError(503, 'Pack is not ready for download yet.');
-    }
-
-    // Step 2: Resolve Telegram download URL
+    const pack = await fetchFromSupabase('packs', packId, 'id,slug,pack_file_id', env);
+    if (!pack) return jsonError(404, 'Pack not found or inactive.');
+    if (!pack.pack_file_id) return jsonError(503, 'Pack is not ready for download yet.');
     const telegramUrl = await getTelegramDownloadUrl(pack.pack_file_id, env);
-    if (!telegramUrl) {
-      return jsonError(502, 'Failed to resolve download URL from Telegram.');
-    }
-
-    // Step 3: Stream to client
+    if (!telegramUrl) return jsonError(502, 'Failed to resolve download URL from Telegram.');
     const filename = `${pack.slug || packId}.zip`;
     const upstream = await fetch(telegramUrl);
-    if (!upstream.ok) {
-      return jsonError(502, 'Failed to stream file from Telegram.');
-    }
-
+    if (!upstream.ok) return jsonError(502, 'Failed to stream file from Telegram.');
     return new Response(upstream.body, {
       status: 200,
       headers: {
@@ -148,16 +135,52 @@ async function handlePackDownload(packId, env) {
       },
     });
   } catch (err) {
-    console.error('Bridge error:', err);
+    console.error('Bridge error (pack):', err);
+    return jsonError(500, 'Internal server error.');
+  }
+}
+
+/**
+ * Handles individual WAV sample download.
+ */
+async function handleSampleDownload(sampleId, env) {
+  try {
+    const sample = await fetchFromSupabase('samples', sampleId, 'id,filename,sample_file_id', env);
+    if (!sample) return jsonError(404, 'Sample not found.');
+    if (!sample.sample_file_id) return jsonError(503, 'Sample file not available for download.');
+    const telegramUrl = await getTelegramDownloadUrl(sample.sample_file_id, env);
+    if (!telegramUrl) return jsonError(502, 'Failed to resolve download URL from Telegram.');
+    const filename = sample.filename || `${sampleId}.wav`;
+    const upstream = await fetch(telegramUrl);
+    if (!upstream.ok) return jsonError(502, 'Failed to stream sample from Telegram.');
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'audio/wav',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Length': upstream.headers.get('Content-Length') || '',
+        'Cache-Control': 'no-store',
+        ...CORS_HEADERS,
+      },
+    });
+  } catch (err) {
+    console.error('Bridge error (sample):', err);
     return jsonError(500, 'Internal server error.');
   }
 }
 
 // ─── SUPABASE + TELEGRAM HELPERS ─────────────────────────────────────────────
 
-async function fetchPackFromSupabase(packId, env) {
+/**
+ * Generic Supabase record fetcher.
+ * Supports both packs and samples tables.
+ */
+async function fetchFromSupabase(table, id, fields, env) {
+  const filters = table === 'packs'
+    ? `id=eq.${id}&is_active=eq.true&is_deleted=eq.false`
+    : `id=eq.${id}`;
   const resp = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/packs?id=eq.${packId}&is_active=eq.true&is_deleted=eq.false&select=id,slug,pack_file_id`,
+    `${env.SUPABASE_URL}/rest/v1/${table}?${filters}&select=${fields}`,
     {
       headers: {
         apikey: env.SUPABASE_SERVICE_ROLE_KEY,
@@ -166,7 +189,7 @@ async function fetchPackFromSupabase(packId, env) {
       },
     }
   );
-  if (!resp.ok) { console.error('Supabase error:', await resp.text()); return null; }
+  if (!resp.ok) { console.error(`Supabase error (${table}):`, await resp.text()); return null; }
   const data = await resp.json();
   return Array.isArray(data) && data.length > 0 ? data[0] : null;
 }
