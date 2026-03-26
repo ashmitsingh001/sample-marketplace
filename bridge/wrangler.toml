@@ -1,0 +1,15 @@
+name = "samply-download-bridge"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# Public vars (non-sensitive)
+SUPABASE_URL = "https://qosxgrcdecdmntgzqxbm.supabase.co"
+
+# Secrets (set via: wrangler secret put TELEGRAM_BOT_TOKEN)
+# TELEGRAM_BOT_TOKEN — set via CLI
+# SUPABASE_SERVICE_ROLE_KEY — set via CLI
+
+[[routes]]
+pattern = "download.samply.workers.dev/*"
+zone_name = ""
