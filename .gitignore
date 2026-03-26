@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+dist/
+.env
+wrangler.toml.local
+test_tmp/
+bridge/node_modules/
+bridge/dist/
